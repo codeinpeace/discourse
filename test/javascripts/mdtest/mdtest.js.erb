@@ -1,8 +1,4 @@
-module("MDTest", {
-  setup: function() {
-    Discourse.SiteSettings.traditional_markdown_linebreaks = false;
-  }
-});
+module("MDTest");
 
 // This is cheating, but the trivial differences between sanitization
 // do not affect formatting.
@@ -42,7 +38,7 @@ function hoistingSanitizer(result) {
 var md = function(input, expected, text) {
   var result = Discourse.Markdown.cook(input, {
         sanitizerFunction: hoistingSanitizer,
-        traditional_markdown_linebreaks: true
+        traditionalMarkdownLinebreaks: true
       }),
       resultNorm = normalize(result),
       expectedNorm = normalize(expected),

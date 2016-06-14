@@ -36,8 +36,7 @@ Discourse.Dialect.replaceBlock({
   withoutLeading: /\[quote/gm, //if leading text contains a quote this should not match
   emitter: function(blockContents, matches) {
 
-    var klass = Discourse.SiteSettings.default_code_lang;
-
+    var klass = this.dialect.options.defaultCodeLang;
     if (acceptableCodeClasses && matches[1] && acceptableCodeClasses.indexOf(matches[1]) !== -1) {
       klass = matches[1];
     }

@@ -1,35 +1,157 @@
-/*eslint no-bitwise:0 */
+import { setup as setupBoldItalics } from 'discourse/lib/discourse-markdown/bold-italics';
+import { setup as setupNewline } from 'discourse/lib/discourse-markdown/newline';
+import { setup as setupHtml } from 'discourse/lib/discourse-markdown/html';
+import { setup as setupAutoLink } from 'discourse/lib/discourse-markdown/auto-link';
+import { setup as setupMentions } from 'discourse/lib/discourse-markdown/mentions';
 
-/**
-
-  Discourse uses the Markdown.js as its main parser. `Discourse.Dialect` is the framework
-  for extending it with additional formatting.
-
-**/
 var parser = window.BetterMarkdown,
     MD = parser.Markdown,
     DialectHelpers = parser.DialectHelpers,
-    dialect = MD.dialects.Discourse = DialectHelpers.subclassDialect( MD.dialects.Gruber ),
-    initialized = false,
     emitters = [],
     hoisted,
     preProcessors = [],
     escape = Discourse.Utilities.escapeExpression;
 
-/**
-  Initialize our dialects for processing.
-
-  @method initializeDialects
-**/
-function initializeDialects() {
-  MD.buildBlockOrder(dialect.block);
-  var index = dialect.block.__order__.indexOf("code");
-  if (index > -1) {
-    dialect.block.__order__.splice(index, 1);
-    dialect.block.__order__.unshift("code");
+class DialectHelper {
+  constructor() {
+    this._dialect = MD.dialects.Discourse = DialectHelpers.subclassDialect(MD.dialects.Gruber);
+    this._setup = false;
   }
-  MD.buildInlinePatterns(dialect.inline);
-  initialized = true;
+
+  registerInline(start, fn) {
+    this._dialect.inline[start] = fn;
+  }
+
+  /**
+    Matches inline using a regular expression. The emitter function is passed
+    the matches from the regular expression.
+
+    For example, this auto links URLs:
+
+    ```javascript
+      helper.inlineRegexp({
+        matcher: /((?:https?:(?:\/{1,3}|[a-z0-9%])|www\d{0,3}[.])(?:[^\s()<>]+|\([^\s()<>]+\))+(?:\([^\s()<>]+\)|[^`!()\[\]{};:'".,<>?«»“”‘’\s]))/gm,
+        spaceBoundary: true,
+        start: 'http',
+
+        emitter: function(matches) {
+          var url = matches[1];
+          return ['a', {href: url}, url];
+        }
+      });
+    ```
+
+    @method inlineRegexp
+    @param {Object} args Our replacement options
+      @param {Function} [opts.emitter] The function that will be called with the contents and regular expresison match and returns JsonML.
+      @param {String} [opts.start] The starting token we want to find
+      @param {String} [opts.matcher] The regular expression to match
+      @param {Boolean} [opts.wordBoundary] If true, the match must be on a word boundary
+      @param {Boolean} [opts.spaceBoundary] If true, the match must be on a space boundary
+  **/
+  inlineRegexp(args) {
+    this.registerInline(args.start, function(text, match, prev) {
+      if (invalidBoundary(args, prev)) { return; }
+
+      args.matcher.lastIndex = 0;
+      const m = args.matcher.exec(text);
+      if (m) {
+        const result = args.emitter.call(this, m);
+        if (result) {
+          return [m[0].length, result];
+        }
+      }
+    });
+  }
+
+  /**
+    After the parser has been executed, post process any text nodes in the HTML document.
+    This is useful if you want to apply a transformation to the text.
+
+    If you are generating HTML from the text, it is preferable to use the replacer
+    functions and do it in the parsing part of the pipeline. This function is best for
+    simple transformations or transformations that have to happen after all earlier
+    processing is done.
+
+    For example, to convert all text to upper case:
+
+    ```javascript
+      helper.postProcessText(function (text) {
+        return text.toUpperCase();
+      });
+    ```
+
+    @method postProcessText
+    @param {Function} emitter The function to call with the text. It returns JsonML to modify the tree.
+  **/
+  postProcessText(fn) {
+    emitters.push(fn);
+  }
+
+  registerBlock(name, fn) {
+    this._dialect.block[name] = fn;
+  }
+
+  setup() {
+    if (this._setup) { return; }
+    this._setup = true;
+
+    setupBoldItalics(this);
+    setupNewline(this);
+    setupHtml(this);
+    setupAutoLink(this);
+    setupMentions(this);
+
+    MD.buildBlockOrder(this._dialect.block);
+    var index = this._dialect.block.__order__.indexOf("code");
+    if (index > -1) {
+      this._dialect.block.__order__.splice(index, 1);
+      this._dialect.block.__order__.unshift("code");
+    }
+    MD.buildInlinePatterns(this._dialect.inline);
+  }
+};
+
+const helper = new DialectHelper();
+
+export function cook(raw, opts) {
+  helper.setup();
+
+  // dialect.options = opts;
+
+  hoisted = {};
+  raw = hoistCodeBlocksAndSpans(raw);
+
+  preProcessors.forEach(p => raw = p(raw, hoister));
+
+  const tree = parser.toHTMLTree(raw, 'Discourse');
+  let result = parser.renderJsonML(parseTree(tree, opts));
+
+  if (opts.sanitize) {
+    result = Discourse.Markdown.sanitize(result);
+  } else if (opts.sanitizerFunction) {
+    result = opts.sanitizerFunction(result);
+  }
+
+  // If we hoisted out anything, put it back
+  const keys = Object.keys(hoisted);
+  if (keys.length) {
+    let found = true;
+
+    function unhoist(key) {
+      result = result.replace(new RegExp(key, "g"), function() {
+        found = true;
+        return hoisted[key];
+      });
+    };
+
+    while (found) {
+      found = false;
+      keys.forEach(unhoist);
+    }
+  }
+
+  return result.trim();
 }
 
 /**
@@ -70,19 +192,11 @@ function processTextNodes(node, event, emitter) {
 }
 
 
-/**
-  Parse a JSON ML tree, using registered handlers to adjust it if necessary.
-
-  @method parseTree
-  @param {Array} tree the JsonML tree to parse
-  @param {Array} path the path of ancestors to the current node in the tree. Can be used for matching.
-  @param {Object} insideCounts counts what tags we're inside
-  @returns {Array} the parsed tree
-**/
-function parseTree(tree, path, insideCounts) {
+// Parse a JSON ML tree, using registered handlers to adjust it if necessary.
+function parseTree(tree, options, path, insideCounts) {
 
   if (tree instanceof Array) {
-    var event = {node: tree, path: path, dialect: dialect, insideCounts: insideCounts || {}};
+    const event = {node: tree, options, path, insideCounts: insideCounts || {}};
     Discourse.Dialect.trigger('parseNode', event);
 
     for (var j=0; j<emitters.length; j++) {
@@ -104,7 +218,7 @@ function parseTree(tree, path, insideCounts) {
         // Remove paragraphs around comment-only nodes.
         tree[i] = n[1];
       } else {
-        parseTree(n, path, insideCounts);
+        parseTree(n, options, path, insideCounts);
       }
 
       insideCounts[tagName] = insideCounts[tagName] - 1;
@@ -240,75 +354,7 @@ function hoistCodeBlocksAndSpans(text) {
   @namespace Discourse
   @module Discourse
 **/
-Discourse.Dialect = {
-
-  // http://stackoverflow.com/a/8809472/17174
-  guid: function(){
-    var d = new Date().getTime();
-    if(window.performance && typeof window.performance.now === "function"){
-        d += performance.now(); //use high-precision timer if available
-    }
-    var uuid = 'xxxxxxxx-xxxx-4xxx-yxxx-xxxxxxxxxxxx'.replace(/[xy]/g, function(c) {
-        var r = (d + Math.random() * 16) % 16 | 0;
-        d = Math.floor(d/16);
-        return (c === 'x' ? r : (r & 0x3 | 0x8)).toString(16);
-    });
-    return uuid;
-  },
-
-  /**
-    Cook text using the dialects.
-
-    @method cook
-    @param {String} text the raw text to cook
-    @param {Object} opts hash of options
-    @returns {String} the cooked text
-  **/
-  cook: function(text, opts) {
-    if (!initialized) { initializeDialects(); }
-
-    dialect.options = opts;
-
-    // Helps us hoist out HTML
-    hoisted = {};
-
-    // pre-hoist all code-blocks/spans
-    text = hoistCodeBlocksAndSpans(text);
-
-    // pre-processors
-    preProcessors.forEach(function(p) {
-      text = p(text, hoister);
-    });
-
-    var tree = parser.toHTMLTree(text, 'Discourse'),
-        result = parser.renderJsonML(parseTree(tree));
-
-    if (opts.sanitize) {
-      result = Discourse.Markdown.sanitize(result);
-    } else if (opts.sanitizerFunction) {
-      result = opts.sanitizerFunction(result);
-    }
-
-    // If we hoisted out anything, put it back
-    var keys = Object.keys(hoisted);
-    if (keys.length) {
-      var found = true;
-
-      var unhoist = function(key) {
-        result = result.replace(new RegExp(key, "g"), function() {
-          found = true;
-          return hoisted[key];
-        });
-      };
-
-      while(found) {
-        found = false;
-        keys.forEach(unhoist);
-      }
-    }
-
-    return result.trim();
-  },
+Discourse.OldDialect = {
 
   /**
     Adds a text pre-processor. Use only if necessary, as a dialect
@@ -317,18 +363,6 @@ Discourse.Dialect = {
   addPreProcessor: function(preProc) {
     preProcessors.push(preProc);
   },
-
-  /**
-    Registers an inline replacer function
-
-    @method registerInline
-    @param {String} start The token the replacement begins with
-    @param {Function} fn The replacing function
-  **/
-  registerInline: function(start, fn) {
-    dialect.inline[start] = fn;
-  },
-
 
   /**
     The simplest kind of replacement possible. Replace a stirng token with JsonML.
@@ -352,47 +386,6 @@ Discourse.Dialect = {
     });
   },
 
-  /**
-    Matches inline using a regular expression. The emitter function is passed
-    the matches from the regular expression.
-
-    For example, this auto links URLs:
-
-    ```javascript
-      Discourse.Dialect.inlineRegexp({
-        matcher: /((?:https?:(?:\/{1,3}|[a-z0-9%])|www\d{0,3}[.])(?:[^\s()<>]+|\([^\s()<>]+\))+(?:\([^\s()<>]+\)|[^`!()\[\]{};:'".,<>?«»“”‘’\s]))/gm,
-        spaceBoundary: true,
-        start: 'http',
-
-        emitter: function(matches) {
-          var url = matches[1];
-          return ['a', {href: url}, url];
-        }
-      });
-    ```
-
-    @method inlineRegexp
-    @param {Object} args Our replacement options
-      @param {Function} [opts.emitter] The function that will be called with the contents and regular expresison match and returns JsonML.
-      @param {String} [opts.start] The starting token we want to find
-      @param {String} [opts.matcher] The regular expression to match
-      @param {Boolean} [opts.wordBoundary] If true, the match must be on a word boundary
-      @param {Boolean} [opts.spaceBoundary] If true, the match must be on a space boundary
-  **/
-  inlineRegexp: function(args) {
-    this.registerInline(args.start, function(text, match, prev) {
-      if (invalidBoundary(args, prev)) { return; }
-
-      args.matcher.lastIndex = 0;
-      var m = args.matcher.exec(text);
-      if (m) {
-        var result = args.emitter.call(this, m);
-        if (result) {
-          return [m[0].length, result];
-        }
-      }
-    });
-  },
 
   /**
     Handles inline replacements surrounded by tokens.
@@ -459,18 +452,6 @@ Discourse.Dialect = {
   },
 
   /**
-    Registers a block for processing. This is more complicated than using one of
-    the other helpers such as `replaceBlock` so consider using them first!
-
-    @method registerBlock
-    @param {String} name the name of the block handler
-    @param {Function} handler the handler
-  **/
-  registerBlock: function(name, handler) {
-    dialect.block[name] = handler;
-  },
-
-  /**
     Replaces a block of text between a start and stop. As opposed to inline, these
     might span multiple lines.
 
@@ -500,8 +481,7 @@ Discourse.Dialect = {
   replaceBlock: function(args) {
     var fn = function(block, next) {
 
-      var linebreaks = dialect.options.traditional_markdown_linebreaks ||
-          Discourse.SiteSettings.traditional_markdown_linebreaks;
+      var linebreaks = dialect.options.traditionalMarkdownLinebreaks;
       if (linebreaks && args.skipIfTradtionalLinebreaks) { return; }
 
       args.start.lastIndex = 0;
@@ -604,32 +584,6 @@ Discourse.Dialect = {
   },
 
   /**
-    After the parser has been executed, post process any text nodes in the HTML document.
-    This is useful if you want to apply a transformation to the text.
-
-    If you are generating HTML from the text, it is preferable to use the replacer
-    functions and do it in the parsing part of the pipeline. This function is best for
-    simple transformations or transformations that have to happen after all earlier
-    processing is done.
-
-    For example, to convert all text to upper case:
-
-    ```javascript
-
-      Discourse.Dialect.postProcessText(function (text) {
-        return text.toUpperCase();
-      });
-
-    ```
-
-    @method postProcessText
-    @param {Function} emitter The function to call with the text. It returns JsonML to modify the tree.
-  **/
-  postProcessText: function(emitter) {
-    emitters.push(emitter);
-  },
-
-  /**
     After the parser has been executed, change the contents of a HTML tag.
 
     Let's say you want to replace the contents of all code tags to prepend
@@ -657,5 +611,3 @@ Discourse.Dialect = {
 };
 
 RSVP.EventTarget.mixin(Discourse.Dialect);
-
-

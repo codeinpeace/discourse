@@ -70,7 +70,6 @@
 //= require ./discourse/lib/link-mentions
 //= require ./discourse/components/site-header
 //= require ./discourse/lib/utilities
-//= require ./discourse/dialects/dialect
 //= require ./discourse/lib/emoji/emoji
 //= require ./discourse/lib/emoji/emoji-groups
 //= require ./discourse/lib/emoji/emoji-toolbar
@@ -95,7 +94,6 @@
 //= require_tree ./discourse/lib
 //= require ./discourse/router
 
-//= require_tree ./discourse/dialects
 //= require_tree ./discourse/controllers
 //= require_tree ./discourse/models
 //= require_tree ./discourse/components

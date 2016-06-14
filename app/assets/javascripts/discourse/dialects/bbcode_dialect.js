@@ -177,6 +177,7 @@ Discourse.Dialect.replaceBlock({
 
   emitter: function(blockContents) {
     var inner = blockContents.join("\n");
-    return ['p', ['pre', ['code', {'class': Discourse.SiteSettings.default_code_lang}, inner]]];
+    var defaultCodeLang = this.dialect.options.defaultCodeLang;
+    return ['p', ['pre', ['code', {'class': `lang-${defaultCodeLang}`}, inner]]];
   }
 });

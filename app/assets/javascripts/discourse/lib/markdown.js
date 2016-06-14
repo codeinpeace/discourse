@@ -223,6 +223,10 @@ Discourse.Markdown = {
   markdownConverter: function(opts) {
     if (!opts) opts = {};
 
+    if (typeof opts.traditionalMarkdownLinebreaks === "undefined") {
+      opts.traditionalMarkdownLinebreaks = Discourse.SiteSettings.traditional_markdown_linebreaks;
+    }
+
     return {
       makeHtml: function(text) {
         text = Discourse.Dialect.cook(text, opts);
